@@ -15,6 +15,7 @@
 // the game polls for are logged once per context.
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 
 #include <rex/audio/xma/context.h>
@@ -97,7 +98,25 @@ XMA_GUARD(XMAIsOutputBufferValid)
 XMA_GUARD(XMASetOutputBufferValid)
 XMA_GUARD(XMASetOutputBufferReadOffset)
 XMA_GUARD(XMAEnableContext)
-XMA_GUARD(XMADisableContext)
+
+// Timed: the audio_hooks watchdog reports a call that never returns (deadlock suspect).
+extern std::atomic<int64_t> g_xma_disable_enter_us;
+extern std::atomic<uint32_t> g_xma_disable_ctx;
+extern std::atomic<uint32_t> g_xma_disable_lr;
+extern std::atomic<uint32_t> g_xma_disable_wait;
+
+extern "C" REX_FUNC(__imp__XMADisableContext) {
+  static Once once;
+  if (null_context(ctx, "XMADisableContext", once)) return;
+  g_xma_disable_ctx = ctx.r3.u32;
+  g_xma_disable_wait = ctx.r4.u32;
+  g_xma_disable_lr = static_cast<uint32_t>(ctx.lr);
+  g_xma_disable_enter_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now().time_since_epoch())
+                               .count();
+  rex::ppc::HostToGuestFunction<&k::XMADisableContext_entry>(ctx, base);
+  g_xma_disable_enter_us = 0;
+}
 
 // The two the game polls every mixer pass: also where decode errors get noticed.
 extern "C" REX_FUNC(__imp__XMAGetOutputBufferReadOffset) {

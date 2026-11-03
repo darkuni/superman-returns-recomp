@@ -116,6 +116,15 @@ class SupermanReturnsApp : public rex::ReXApp {
       if (!config_path_.empty()) rex::cvar::SaveConfig(config_path_);
       REXLOG_INFO("Defaults v5: xma_trace off");
     }
+    // v0.0.5 (test 4): the stall setting never fired in test 3; back to the stock
+    // decoder behaviour test 2 had, so the mixer watchdog (src/audio_hooks.cpp)
+    // is the only change being measured.
+    if (rex::cvar::Query<int32_t>("recomp_defaults_version") < 6) {
+      rex::cvar::SetFlagByName("xma_stall_on_missing_packet", "false");
+      rex::cvar::SetFlagByName("recomp_defaults_version", "6");
+      if (!config_path_.empty()) rex::cvar::SaveConfig(config_path_);
+      REXLOG_INFO("Defaults v6: xma_stall_on_missing_packet off");
+    }
     REXLOG_INFO("Audio buffer: {} frames", rex::cvar::Query<int32_t>("audio_maxqframes"));
   }
 

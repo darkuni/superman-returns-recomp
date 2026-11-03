@@ -92,6 +92,19 @@ The seven `.embsec_` sections are extra code sections covered by `.pdata`; check
   DLL's), forwards to the SDK's *_entry, returns 0 on a NULL context (logged once per call), and logs
   each new decode/parser error pair the game polls. Defaults v5 turn xma_trace back off.
 
+## Test 4 (Windows): same crash, but the "context" was 0x8264CE28 = the reverb command handler
+- So tests 2-4 are one bug: mixer commands written outside the command buffer (over the voice list).
+- Mixer (global 0x8299FDC8, init sub_8264C958): command buffer +0x20, capacity +0x24 (1 MB),
+  write offset +0x28, high-water +0x2C. DSP update sub_8264C540 drains it under the mixer lock.
+  Producers (reverb sub_8264CE48 16 B, effect sub_82661FC0 24 B, one 8 B inline push in
+  sub_826502A8) never check capacity. Shutdown sub_8264C6D0 frees it; sub_82335E28 tears down all.
+- 1 MB only overflows if DSP updates stop entirely: audio dies (updates stop), game keeps pushing
+  reverb changes every frame (flight), buffer runs off its end later -> crash.
+- Build 5: src/audio_hooks.cpp bounds-checks the two hookable producers (drop + log), logs
+  init/shutdown/teardown with caller, fill high-water, update gaps, and a watchdog that reports a DSP
+  update stuck inside (lock), updates stopping, or an XMADisableContext that never returns.
+  Defaults v6: xma_stall_on_missing_packet back off (test 2 baseline).
+
 ## Linux build (checked in this session, Ubuntu 24.04 / clang 20)
 - Compiles and links. Boots under Xvfb + Mesa llvmpipe: Vulkan up, XEX loads, recompiled code runs into
   the game's own archive loading (`d:\DATA\*.AST`). Without fmv.AST / sound.AST it waits there.

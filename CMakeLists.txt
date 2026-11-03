@@ -17,6 +17,7 @@ set(SUPERMANRETURNS_SOURCES
     src/crash_handler.cpp
     src/disc_setup.cpp
     src/xma_guard.cpp
+    src/audio_hooks.cpp
 )
 
 if(WIN32)
