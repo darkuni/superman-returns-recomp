@@ -20,9 +20,12 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <thread>
 
 #include <rex/hook.h>
+
+#include "ea_track.h"
 #include <rex/logging.h>
 
 extern "C" REX_FUNC(__imp__sub_8264CE48);  // reverb parameter push (16 bytes)
@@ -123,7 +126,8 @@ namespace {
 // updates no longer arriving (render callback not called), or an XMADisableContext that
 // does not return. That is what separates a deadlock from a stalled audio driver.
 void watchdog() {
-  bool stuck = false, starved = false, disabling = false;
+  bool stuck = false, starved = false, disabling = false, repeat_done = false,
+       drained_logged = false;
   int64_t episode_start = 0;
   for (;;) {
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
@@ -158,10 +162,30 @@ void watchdog() {
       }
     } else if (starved && last > episode_start) {
       starved = false;
+      repeat_done = false;
       REXAPU_WARN("[mixer] watchdog: DSP updates resumed after {} ms ({} render callbacks, {} game "
                   "frames, {} silence fills so far)",
                   (last - episode_start) / 1000, g_pacing_callbacks.load(), g_submits.load(),
                   g_filled.load());
+    }
+    if (starved && !repeat_done && now - episode_start > 5000000) {
+      repeat_done = true;
+      REXAPU_WARN("[mixer] watchdog: still no DSP update after {} ms - second report:",
+                  (now - episode_start) / 1000);
+      if (g_base) ea_audio_stall_report(g_base);
+    }
+    // Audio is already dead while DSP updates are stalled; the queued commands will never
+    // run. Empty the buffer before it overflows into the memory after it (that overflow is
+    // what crashed tests 2-7 - one 8-byte push sits inside a function and can't be guarded).
+    if (starved && mixer && g_base && cap && off > cap / 10 * 9) {
+      const uint32_t zero = 0;
+      std::memcpy(g_base + mixer + 0x28, &zero, 4);
+      if (!drained_logged) {
+        drained_logged = true;
+        REXAPU_WARN("[mixer] watchdog: command buffer {}% full with DSP updates stalled - emptied it "
+                    "so it can't overflow (logged once)",
+                    uint64_t(off) * 100 / cap);
+      }
     }
 
     const int64_t dis = g_xma_disable_enter_us.load();
@@ -219,6 +243,7 @@ extern "C" REX_FUNC(sub_8264C540) {
   }
   g_update_lr = lr_of(ctx);
   g_update_enter_us = now_us();
+  EaScope scope(0x8264C540);
   __imp__sub_8264C540(ctx, base);
   g_update_enter_us = 0;
   g_last_update_us = now_us();

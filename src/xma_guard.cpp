@@ -24,6 +24,8 @@
 #include <rex/logging.h>
 #include <rex/types.h>
 
+#include "ea_track.h"
+
 namespace rex::kernel::xboxkrnl {
 u32 XMACreateContext_entry(mapped_u32 context_out_ptr);
 u32 XMAReleaseContext_entry(mapped_void context_ptr);
@@ -52,6 +54,7 @@ struct Once {
 };
 
 bool null_context(PPCContext& ctx, const char* name, Once& once) {
+  if (t_is_ea_audio) ++g_ea_xma_calls;
   if (ctx.r3.u32 != 0) return false;
   if (once.first()) {
     REXAPU_WARN("[xma-guard] {}(NULL) from {:08X} - voice already released; returning 0 "

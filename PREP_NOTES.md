@@ -134,6 +134,19 @@ The seven `.embsec_` sections are extra code sections covered by `.pdata`; check
   adds XAudio2 engine state, event states, pass / timer-routine counts, all XAudio2 calls in last 3 s.
 - Minidumps: symbolize with python minidump + the build's .map (stacks are only 1-3 KB each).
 
+## Test 7 (Windows): XAudio2 alive, EA voice stops consuming, EA thread blocked elsewhere
+- Stall report: XAudio2 passes 6948 (last 5 ms ago), EA voice *pass* callbacks 6948 (still coming -
+  its event IS set every pass), buffer-end callbacks stopped at 6705. Keep-alive kicked every tick
+  but produced no DSP update -> the EA thread (RWAudioCore "Dac") is not in its wait.
+- During the stall the XAudio2 calls come from 0x8247xxxx = the XMV movie player ("CCalChannel"):
+  8 voices created, ~7600 buffer submits. The flight cinematic is an XMV movie.
+- No XMA context has an error flag. Still crashed on the unguardable 8-byte inline push.
+- Build 8: watchdog empties the command buffer at 90% while stalled (no overflow possible). EA
+  thread call stack tracking (ea_track.h: render 8265A148, XMA stream reader 826592F0, 82658958,
+  timers, lock 825FC108, wait 821169A8 ...) + XMA call count, reported at +1 s and +5 s of a stall.
+- Local test env after a container restart: start pulseaudio again (else no callbacks); logs only
+  flush on warnings, so a silent log is not a hang - check with gdb "thread apply all bt".
+
 ## Linux build (checked in this session, Ubuntu 24.04 / clang 20)
 - Compiles and links. Boots under Xvfb + Mesa llvmpipe: Vulkan up, XEX loads, recompiled code runs into
   the game's own archive loading (`d:\DATA\*.AST`). Without fmv.AST / sound.AST it waits there.

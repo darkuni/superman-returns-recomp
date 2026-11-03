@@ -25,6 +25,8 @@
 #include <cstring>
 
 #include <rex/hook.h>
+
+#include "ea_track.h"
 #include <rex/logging.h>
 
 extern "C" REX_FUNC(__imp__sub_82650B78);  // EA audio thread loop
@@ -49,6 +51,16 @@ int64_t now_us() {
 }
 
 std::atomic<uint32_t> g_ea_obj{0};
+}  // namespace
+
+thread_local bool t_is_ea_audio = false;
+std::atomic<uint32_t> g_ea_stack[kEaStackMax] = {};
+std::atomic<int64_t> g_ea_stack_since[kEaStackMax] = {};
+std::atomic<int> g_ea_depth{0};
+std::atomic<uint64_t> g_ea_xma_calls{0};
+int64_t ea_now_us() { return now_us(); }
+
+namespace {
 std::atomic<uint64_t> g_pass_cb{0}, g_end_cb{0}, g_kicks{0};
 std::atomic<int64_t> g_last_pass_us{0}, g_last_end_us{0};
 std::atomic<uint64_t> g_xa_after{0}, g_xa_timer{0};
@@ -98,6 +110,7 @@ void note(uint32_t addr, uint32_t lr) {
 #define XA_HOOK_I(a, i)                                    \
   extern "C" REX_FUNC(sub_##a) {                           \
     note<i>(0x##a, static_cast<uint32_t>(ctx.lr));         \
+    EaScope scope(0x##a);                                  \
     __imp__sub_##a(ctx, base);                             \
   }
 namespace {
@@ -115,9 +128,23 @@ constexpr int idx(uint32_t a) {
 #define XA_HOOK(a) XA_HOOK_I(a, idx(0x##a))
 XA_LIST(XA_HOOK)
 
+// --- EA audio thread call tracking (scopes only count on that thread) ---------
+#define EA_TRACK_DECL(a) extern "C" REX_FUNC(__imp__sub_##a);
+#define EA_TRACK_HOOK(a)          \
+  extern "C" REX_FUNC(sub_##a) {  \
+    EaScope scope(0x##a);         \
+    __imp__sub_##a(ctx, base);    \
+  }
+// sub_8264C540 (DSP update) is hooked in src/audio_hooks.cpp; it calls ea_track_dsp().
+#define EA_TRACKED_HERE(X) X(8265A148) X(826592F0) X(82658958) X(8265AAD0) X(8265AB00) \
+  X(82650810) X(825FC108) X(821169A8) X(8264C400) X(8264C410) X(8265A6C0)
+EA_TRACKED_HERE(EA_TRACK_DECL)
+EA_TRACKED_HERE(EA_TRACK_HOOK)
+
 // --- EA audio thread and voice callbacks --------------------------------------
 extern "C" REX_FUNC(sub_82650B78) {
   g_ea_obj = ctx.r3.u32;
+  t_is_ea_audio = true;
   REXAPU_WARN("[ea-audio] audio thread loop started (object {:08X}, wait event {:08X})",
               ctx.r3.u32, rd32(base, ctx.r3.u32 + 0x30A0));
   __imp__sub_82650B78(ctx, base);
@@ -206,6 +233,13 @@ void ea_audio_stall_report(uint8_t* base) {
       REXAPU_WARN("[ea-audio]   XAudio2 wrapper {:08X}: {} calls, last {} ms ago from {:08X}",
                   s.addr, s.calls.load(), (now - t) / 1000, lr);
     }
+  }
+  const int depth = g_ea_depth.load();
+  REXAPU_WARN("[ea-audio]   audio thread call stack (depth {}), XMA calls made by it so far {}:", depth,
+              g_ea_xma_calls.load());
+  for (int d = 0; d < depth && d < kEaStackMax; d++) {
+    REXAPU_WARN("[ea-audio]     #{} sub_{:08X} (entered {} ms ago)", d, g_ea_stack[d].load(),
+                (now - g_ea_stack_since[d].load()) / 1000);
   }
   xma_report_errors(base);
 }
