@@ -1,0 +1,19 @@
+# Superman Returns (USA) - Xbox 360 disc, title ID 454107ED (EA)
+# Hand-written ahead of the first codegen pass; ReXGlue will rewrite the header.
+
+[project]
+name = "superman_returns"
+sdk_version = "0.9.0"
+game_root = "assets"
+
+[entrypoint]
+file_path = "assets/default.xex"
+out_directory_path = "generated/default"
+includes = ["superman_returns_overrides.toml"]
+# MSVC Xbox CRT setjmp/longjmp, emitted as host setjmp/longjmp so the host
+# stack unwinds with the guest one.
+# setjmp: no .pdata entry (hand-written CRT asm) - hook check at 829B2FA8, then
+#         mflr/mfcr + stfd f14..f31 off r3. 8 callers.
+# longjmp: val 0 -> 1, unwind check, then lfd f14..f31 / ld r13.. off r7. 21 callers.
+setjmp_address = 0x827A45E0
+longjmp_address = 0x827A4270

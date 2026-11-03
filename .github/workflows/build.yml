@@ -1,0 +1,324 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      sdk_pkg:
+        description: "SDK package override (e.g. v0.9.0 for stock, for A/B tests)"
+        required: false
+        default: ""
+      release_tag:
+        description: "Publish a release with this tag (e.g. v1.0.0)"
+        required: false
+        default: ""
+      prerelease:
+        description: "Mark it as a prerelease"
+        type: boolean
+        required: false
+        default: true
+
+env:
+  REXGLUE_SDK_REF: v0.9.0
+  # Windows: prebuilt package from darkuni/rexglue-sdk-builds (stock v0.9.0).
+  # Linux: built here from the upstream tag and cached.
+  REXGLUE_SDK_PKG: ${{ inputs.sdk_pkg != '' && inputs.sdk_pkg || 'v0.9.0' }}
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 240
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Install LLVM (clang 20+) and Ninja
+        shell: pwsh
+        run: |
+          choco install llvm ninja -y --no-progress
+          "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+      
+      - name: MSVC environment (headers/libs for clang)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Toolchain versions
+        shell: pwsh
+        run: |
+          clang++ --version
+          cmake --version
+          ninja --version
+
+      # ---------- ReXGlue SDK ----------
+      # 1) Prebuilt package from darkuni/rexglue-sdk-builds (fast path).
+      # 2) Fallback: this repo's cache, else compile the SDK here.
+      - name: Download prebuilt SDK
+        id: sdk-prebuilt
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $url = "https://github.com/darkuni/rexglue-sdk-builds/releases/download/sdk-$env:REXGLUE_SDK_PKG/rexglue-sdk-$env:REXGLUE_SDK_PKG-win-amd64-release.zip"
+          Invoke-WebRequest -Uri $url -OutFile sdk.zip
+          Expand-Archive sdk.zip -DestinationPath rexglue-sdk-install
+          Get-Content rexglue-sdk-install\BUILD_INFO.txt
+          "ok=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Restore SDK install cache
+        id: sdk-cache
+        if: steps.sdk-prebuilt.outputs.ok != 'true'
+        uses: actions/cache@v4
+        with:
+          path: rexglue-sdk-install
+          key: rexglue-sdk-${{ env.REXGLUE_SDK_PKG }}-win-amd64
+
+      - name: Keep LF line endings (SDK patches are LF)
+        if: steps.sdk-prebuilt.outputs.ok != 'true' && steps.sdk-cache.outputs.cache-matched-key == ''
+        shell: pwsh
+        run: git config --global core.autocrlf false
+
+      - name: Checkout ReXGlue SDK
+        if: steps.sdk-prebuilt.outputs.ok != 'true' && steps.sdk-cache.outputs.cache-matched-key == ''
+        uses: actions/checkout@v4
+        with:
+          repository: rexglue/rexglue-sdk
+          ref: ${{ env.REXGLUE_SDK_REF }}
+          path: rexglue-sdk
+          submodules: recursive
+
+      - name: Checkout SDK patches
+        if: steps.sdk-prebuilt.outputs.ok != 'true' && steps.sdk-cache.outputs.cache-matched-key == '' && env.REXGLUE_SDK_PKG != env.REXGLUE_SDK_REF
+        uses: actions/checkout@v4
+        with:
+          repository: darkuni/rexglue-sdk-builds
+          path: sdk-builds
+
+      - name: Build and install SDK
+        if: steps.sdk-prebuilt.outputs.ok != 'true' && steps.sdk-cache.outputs.cache-matched-key == ''
+        shell: pwsh
+        working-directory: rexglue-sdk
+        run: |
+          # Stock package (PKG == REF): no patches. Otherwise apply sdk-builds patches/.
+          Get-ChildItem ..\sdk-builds\patches\*.patch -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object {
+            if ($_.Name -like '*.ffmpeg.patch') {
+              git -C thirdparty/FFmpeg apply --ignore-whitespace --whitespace=nowarn $_.FullName
+            } else {
+              git apply --ignore-whitespace --whitespace=nowarn $_.FullName
+            }
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          cmake --preset win-amd64 `
+            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ `
+            -DREXGLUE_ENABLE_TRACY=OFF `
+            "-DCMAKE_INSTALL_PREFIX=$env:GITHUB_WORKSPACE/rexglue-sdk-install"
+          cmake --build out/build/win-amd64 --config Release --target install --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # ---------- Game ----------
+      - name: Compiler cache for generated code
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          variant: sccache
+          key: superman-returns-win-amd64
+
+      - name: Configure game
+        shell: pwsh
+        run: |
+          cmake -S . -B out -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ `
+            "-DCMAKE_C_FLAGS=-march=x86-64-v3" "-DCMAKE_CXX_FLAGS=-march=x86-64-v3" `
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache `
+            "-DCMAKE_PREFIX_PATH=$env:GITHUB_WORKSPACE/rexglue-sdk-install"
+
+      - name: Build game
+        shell: pwsh
+        run: |
+          cmake --build out --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Stage package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item out\superman_returns.exe dist\
+          Copy-Item out\superman_returns.map dist\ -ErrorAction SilentlyContinue
+          Get-ChildItem out -Filter *.dll | Copy-Item -Destination dist\
+          Get-ChildItem "$env:GITHUB_WORKSPACE\rexglue-sdk-install\bin" -Filter *.dll -ErrorAction SilentlyContinue |
+            Where-Object { -not (Test-Path ("dist\" + $_.Name)) } | Copy-Item -Destination dist\
+          @"
+          Superman Returns - native Windows build (ReXGlue static recompilation)
+          https://github.com/darkuni/superman-returns-recomp
+
+          Game files are NOT included. You need your own Superman Returns (USA) Xbox 360 disc.
+
+          Setup
+            Put your own disc image (.iso) next to superman_returns.exe and run it. On the first start it
+            makes the "assets" folder from it (about 2 GB); after that the .iso isn't needed any more.
+            (Already extracted? Put default.xex and the DATA folder in an "assets" folder instead.)
+            If Windows says a DLL (e.g. VCRUNTIME140.dll) is missing, install the Microsoft Visual C++
+            Redistributable 2015-2022 (x64): https://aka.ms/vs/17/release/vc_redist.x64.exe
+
+          F1 / Esc: settings (display, audio buffer, keys). F11: fullscreen. F3: performance overlay. Settings are saved in superman_returns.toml.
+          Keyboard + mouse: WASD move, mouse camera, mouse buttons = triggers, Space/Shift/R/E = A/B/X/Y,
+          Q/F = bumpers, Enter = Start, Tab = Back. A controller is recommended.
+          Crash reports: crash-*.txt + .dmp next to the exe (superman_returns.map decodes them).
+
+          Unofficial fan project, not affiliated with or endorsed by Electronic Arts, Warner Bros. or Microsoft. The exe
+          contains code machine-translated from the game's executable; game data comes from your own disc.
+          ReXGlue SDK: BSD-3-Clause (portions from Xenia) - see licenses\.
+          "@ | Out-File dist\README.txt -Encoding utf8
+          New-Item -ItemType Directory -Force dist\licenses | Out-Null
+          Copy-Item LICENSE dist\licenses\superman-returns-recomp-LICENSE.txt
+          if (Test-Path "$env:GITHUB_WORKSPACE\rexglue-sdk-install\share\licenses") {
+            Copy-Item -Recurse "$env:GITHUB_WORKSPACE\rexglue-sdk-install\share\licenses\*" dist\licenses\
+          }
+          Get-ChildItem dist
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: superman_returns-win-amd64
+          path: dist/
+
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Toolchain and SDK dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang-20 lld-20 ninja-build nasm pkg-config \
+            libx11-dev libx11-xcb-dev libxcb1-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxss-dev libxtst-dev libwayland-dev libxkbcommon-dev libgtk-3-dev libasound2-dev libpulse-dev
+          clang++-20 --version
+          cmake --version
+
+      - name: Restore SDK install cache
+        id: sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: rexglue-sdk-install
+          key: rexglue-sdk-${{ env.REXGLUE_SDK_REF }}-linux-amd64-v3
+
+      - name: Checkout ReXGlue SDK
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: rexglue/rexglue-sdk
+          ref: ${{ env.REXGLUE_SDK_REF }}
+          path: rexglue-sdk
+          submodules: recursive
+
+      - name: Build and install SDK
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        working-directory: rexglue-sdk
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 \
+            "-DCMAKE_C_FLAGS=-march=x86-64-v3" "-DCMAKE_CXX_FLAGS=-march=x86-64-v3" \
+            -DREXGLUE_ENABLE_TRACY=OFF -DREXGLUE_BUILD_TESTS=OFF \
+            "-DCMAKE_INSTALL_PREFIX=$GITHUB_WORKSPACE/rexglue-sdk-install"
+          cmake --build build --target install --parallel
+
+      - name: Compiler cache for generated code
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: superman-returns-linux-amd64
+
+      - name: Configure game
+        run: |
+          cmake -S . -B out -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 \
+            "-DCMAKE_C_FLAGS=-march=x86-64-v3" "-DCMAKE_CXX_FLAGS=-march=x86-64-v3" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            "-DCMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/rexglue-sdk-install"
+
+      - name: Build game
+        run: cmake --build out --parallel
+
+      - name: Stage package
+        run: |
+          mkdir -p dist/licenses
+          cp out/superman_returns dist/
+          find out -maxdepth 1 -name '*.so*' -exec cp -P {} dist/ \;
+          if [ -d rexglue-sdk-install/lib ]; then
+            find rexglue-sdk-install/lib -maxdepth 1 -name '*.so*' -exec cp -Pn {} dist/ \;
+          fi
+          cat > dist/README.txt <<'TXT'
+          Superman Returns - native Linux build (ReXGlue static recompilation)
+          https://github.com/darkuni/superman-returns-recomp
+
+          Game files are NOT included. You need your own Superman Returns (USA) Xbox 360 disc.
+
+          Setup
+            Put your own disc image (.iso) in this folder and run ./superman_returns. On the first start it
+            makes the "assets" folder from it (about 2 GB); after that the .iso isn't needed any more.
+            (Already extracted? Put default.xex and the DATA folder in an "assets" folder instead.)
+            Needs a Vulkan driver (standard on SteamOS / Steam Deck).
+            Steam Deck: in Desktop Mode, add superman_returns to Steam as a non-Steam game.
+
+          F1 / Esc: settings (display, audio buffer, keys). F11: fullscreen.
+          F3: performance overlay. Settings are saved in superman_returns.toml.
+          Keyboard + mouse: WASD move, mouse camera, mouse buttons = triggers, Space/Shift/R/E = A/B/X/Y,
+          Q/F = bumpers, Enter = Start, Tab = Back. A controller is recommended.
+
+          Unofficial fan project, not affiliated with or endorsed by Electronic Arts, Warner Bros. or Microsoft.
+          The binary contains code machine-translated from the game's executable; game data comes from your
+          own disc. ReXGlue SDK: BSD-3-Clause (portions from Xenia) - see licenses/.
+          TXT
+          cp LICENSE dist/licenses/superman-returns-recomp-LICENSE.txt
+          if [ -d rexglue-sdk-install/share/licenses ]; then cp -r rexglue-sdk-install/share/licenses/* dist/licenses/; fi
+          chmod +x dist/superman_returns
+          tar -C dist -czf superman_returns-linux-amd64.tar.gz .
+          ls -la dist
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: superman_returns-linux-amd64
+          path: superman_returns-linux-amd64.tar.gz
+
+  release:
+    needs: [windows, linux]
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Download builds
+        uses: actions/download-artifact@v4
+        with:
+          path: builds
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ inputs.release_tag }}"
+          [ -n "$tag" ] || tag="${{ github.ref_name }}"
+          win="superman_returns-$tag-win-amd64.zip"
+          lin="superman_returns-$tag-linux-amd64.tar.gz"
+          (cd builds/superman_returns-win-amd64 && zip -qr "$GITHUB_WORKSPACE/$win" .)
+          cp builds/superman_returns-linux-amd64/superman_returns-linux-amd64.tar.gz "$lin"
+          # A release published from the GitHub page already exists: attach the files to it.
+          # Otherwise (tag pushed, or release_tag input) create one; prerelease unless the input says not to.
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$tag" "$win" "$lin" --clobber --repo "${{ github.repository }}"
+          else
+            pre="--prerelease"
+            [ "${{ inputs.prerelease }}" = "false" ] && pre=""
+            gh release create "$tag" "$win" "$lin" --repo "${{ github.repository }}" --target "${{ github.sha }}" \
+              $pre --title "Superman Returns $tag" --notes-file RELEASE_NOTES.md
+          fi
