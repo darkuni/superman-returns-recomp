@@ -105,6 +105,20 @@ The seven `.embsec_` sections are extra code sections covered by `.pdata`; check
   update stuck inside (lock), updates stopping, or an XMADisableContext that never returns.
   Defaults v6: xma_stall_on_missing_packet back off (test 2 baseline).
 
+## Test 5 (Windows): the cause - render callbacks stop when the flight cinematic starts
+- Watchdog: "no DSP update for 1162 ms - the audio driver stopped calling the game" right after the
+  cinematic load; nothing blocked, no XMADisableContext hang. Buffer full 5 s later (pushes dropped),
+  then the unguarded 8-byte inline push corrupted a voice -> NULL context -> crash.
+- SDK pacing: AudioSystem's worker waits on a 16-permit semaphore per client; a permit only returns
+  when the device plays a frame the game submitted. A callback that submits nothing loses its permit;
+  16 of those and the worker never calls the game again. Hardware drives the callback by timer.
+- Build 6: src/audio_pacing.cpp wraps XAudioRegisterRenderDriverClient, swaps the game's callback
+  (821209F0) in the FunctionDispatcher (Memory::SetFunction alone is NOT what Execute() reads), and
+  submits a silent frame whenever the game's callback returns without one. Verified here with
+  PulseAudio null sink + a forced 60-callback skip: callbacks kept coming.
+- Local test notes: Xvfb wedges after a while (restart it); logs only flush on warnings, so use
+  REXAPU_WARN for test lines; SDL here has pulseaudio, not dummy/disk.
+
 ## Linux build (checked in this session, Ubuntu 24.04 / clang 20)
 - Compiles and links. Boots under Xvfb + Mesa llvmpipe: Vulkan up, XEX loads, recompiled code runs into
   the game's own archive loading (`d:\DATA\*.AST`). Without fmv.AST / sound.AST it waits there.

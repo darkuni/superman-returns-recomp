@@ -109,6 +109,11 @@ std::atomic<uint32_t> g_xma_disable_ctx{0};
 std::atomic<uint32_t> g_xma_disable_lr{0};
 std::atomic<uint32_t> g_xma_disable_wait{0};
 
+// Counted by src/audio_pacing.cpp: render callbacks, frames the game submitted, silence fills.
+extern std::atomic<uint64_t> g_pacing_callbacks;
+extern std::atomic<uint64_t> g_submits;
+extern std::atomic<uint64_t> g_filled;
+
 namespace {
 // Reports, once per episode, a DSP update stuck inside (blocked - the mixer lock?), DSP
 // updates no longer arriving (render callback not called), or an XMADisableContext that
@@ -141,13 +146,17 @@ void watchdog() {
       if (!starved) {
         starved = true;
         episode_start = last;
-        REXAPU_WARN("[mixer] watchdog: no DSP update for {} ms - the audio driver stopped calling "
-                    "the game. Command buffer {} of {} bytes",
-                    (now - last) / 1000, off, cap);
+        REXAPU_WARN("[mixer] watchdog: no DSP update for {} ms. Command buffer {} of {} bytes. "
+                    "So far: {} render callbacks, {} game frames, {} silence fills",
+                    (now - last) / 1000, off, cap, g_pacing_callbacks.load(), g_submits.load(),
+                    g_filled.load());
       }
     } else if (starved && last > episode_start) {
       starved = false;
-      REXAPU_WARN("[mixer] watchdog: DSP updates resumed after {} ms", (last - episode_start) / 1000);
+      REXAPU_WARN("[mixer] watchdog: DSP updates resumed after {} ms ({} render callbacks, {} game "
+                  "frames, {} silence fills so far)",
+                  (last - episode_start) / 1000, g_pacing_callbacks.load(), g_submits.load(),
+                  g_filled.load());
     }
 
     const int64_t dis = g_xma_disable_enter_us.load();
