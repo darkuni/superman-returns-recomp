@@ -74,6 +74,15 @@ The seven `.embsec_` sections are extra code sections covered by `.pdata`; check
   Gaps that are labels or branch targets inside existing functions are skipped (counting artifacts).
   Added 252 functions over three passes until stable: 33,286 functions, codegen still clean.
 
+## Test 2 (Windows): all audio stopped when flight started, crash after landing
+- Crash: sub_8264CE48 (pushes a command into the reverb/DSP command queue) wrote to guest 0x0000000C -
+  the queue's buffer was NULL, i.e. the audio engine had already shut down.
+- Xenia's tracker lists this game as apu-silent on master and playable on Canary: emulator-side audio.
+- Candidate: stock XMA decoder raises error 4 when a frame runs into the next streaming input buffer
+  before the game marks it valid (the hardware waits). Flight starts new streamed music.
+- Build 3: SDK package p23 on both platforms (Linux applies the sdk-builds patches at tag
+  sdk-v0.9.0-p23), defaults v4 turn on xma_stall_on_missing_packet + xma_trace.
+
 ## Linux build (checked in this session, Ubuntu 24.04 / clang 20)
 - Compiles and links. Boots under Xvfb + Mesa llvmpipe: Vulkan up, XEX loads, recompiled code runs into
   the game's own archive loading (`d:\DATA\*.AST`). Without fmv.AST / sound.AST it waits there.

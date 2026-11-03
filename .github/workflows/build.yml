@@ -24,9 +24,10 @@ on:
 
 env:
   REXGLUE_SDK_REF: v0.9.0
-  # Windows: prebuilt package from darkuni/rexglue-sdk-builds (stock v0.9.0).
-  # Linux: built here from the upstream tag and cached.
-  REXGLUE_SDK_PKG: ${{ inputs.sdk_pkg != '' && inputs.sdk_pkg || 'v0.9.0' }}
+  # Windows: prebuilt package from darkuni/rexglue-sdk-builds.
+  # Linux: built here from the upstream tag + that package's patches (sdk-builds tag), cached.
+  # p23 = XMA fixes/diagnostics (xma_stall_on_missing_packet, xma_trace).
+  REXGLUE_SDK_PKG: ${{ inputs.sdk_pkg != '' && inputs.sdk_pkg || 'v0.9.0-p23' }}
 
 permissions:
   contents: write
@@ -209,7 +210,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: rexglue-sdk-install
-          key: rexglue-sdk-${{ env.REXGLUE_SDK_REF }}-linux-amd64-v3
+          key: rexglue-sdk-${{ env.REXGLUE_SDK_PKG }}-linux-amd64-v3
 
       - name: Checkout ReXGlue SDK
         if: steps.sdk-cache.outputs.cache-hit != 'true'
@@ -220,10 +221,28 @@ jobs:
           path: rexglue-sdk
           submodules: recursive
 
+      - name: Checkout SDK patches
+        if: steps.sdk-cache.outputs.cache-hit != 'true' && env.REXGLUE_SDK_PKG != env.REXGLUE_SDK_REF
+        uses: actions/checkout@v4
+        with:
+          repository: darkuni/rexglue-sdk-builds
+          ref: sdk-${{ env.REXGLUE_SDK_PKG }}
+          path: sdk-builds
+
       - name: Build and install SDK
         if: steps.sdk-cache.outputs.cache-hit != 'true'
         working-directory: rexglue-sdk
         run: |
+          # Stock package (PKG == REF): no patches. Otherwise apply sdk-builds patches/.
+          if [ -d ../sdk-builds/patches ]; then
+            for p in $(ls ../sdk-builds/patches/*.patch | sort); do
+              case "$p" in
+                *.ffmpeg.patch) git -C thirdparty/FFmpeg apply --ignore-whitespace --whitespace=nowarn "$p" ;;
+                *) git apply --ignore-whitespace --whitespace=nowarn "$p" ;;
+              esac
+              echo "applied $p"
+            done
+          fi
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 \
             "-DCMAKE_C_FLAGS=-march=x86-64-v3" "-DCMAKE_CXX_FLAGS=-march=x86-64-v3" \

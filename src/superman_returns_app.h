@@ -95,6 +95,18 @@ class SupermanReturnsApp : public rex::ReXApp {
       if (!config_path_.empty()) rex::cvar::SaveConfig(config_path_);
       REXLOG_INFO("Steam Deck detected: texture filtering off, small audio buffer");
     }
+    // v0.0.3 (test 2: all audio died when flight started, then a crash in the
+    // reverb's command queue). XMA frames that run into the next streaming
+    // buffer before the game marks it valid raised decode error 4 in the stock
+    // decoder; wait for the buffer as the hardware does. xma_trace logs XMA
+    // setup and errors so the next log shows what the audio engine hit.
+    if (rex::cvar::Query<int32_t>("recomp_defaults_version") < 4) {
+      rex::cvar::SetFlagByName("xma_stall_on_missing_packet", "true");
+      rex::cvar::SetFlagByName("xma_trace", "true");
+      rex::cvar::SetFlagByName("recomp_defaults_version", "4");
+      if (!config_path_.empty()) rex::cvar::SaveConfig(config_path_);
+      REXLOG_INFO("Defaults v4: xma_stall_on_missing_packet on, xma_trace on");
+    }
     REXLOG_INFO("Audio buffer: {} frames", rex::cvar::Query<int32_t>("audio_maxqframes"));
   }
 
