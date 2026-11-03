@@ -22289,6 +22289,12 @@ DEFINE_REX_FUNC(sub_82116C30) {
 	return;
 }
 
+DEFINE_REX_FUNC(sub_82116C4C) {
+	REX_FUNC_PROLOGUE();
+	// blr 
+	return;
+}
+
 DEFINE_REX_FUNC(sub_82116C50) {
 	REX_FUNC_PROLOGUE();
 	uint32_t ea{};

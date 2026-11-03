@@ -66,6 +66,14 @@ The seven `.embsec_` sections are extra code sections covered by `.pdata`; check
 - Keyboard + mouse uses the SDK's 3D layout (WASD, mouse camera); Start moved to Enter because Esc opens
   the settings menu.
 
+## Test 1 (Windows, 2026-11-03): crash after the intro movies
+- FATAL: call to unregistered function 0x826D17A0. A leaf function with no .pdata and no static
+  pointer (reached through a pointer built at runtime), sitting right after a bctr thunk - codegen's
+  gap-fill stops after those.
+- New tools/scan_gaps.py finds every uncovered stretch of .text that starts after a return/tail jump.
+  Gaps that are labels or branch targets inside existing functions are skipped (counting artifacts).
+  Added 252 functions over three passes until stable: 33,286 functions, codegen still clean.
+
 ## Linux build (checked in this session, Ubuntu 24.04 / clang 20)
 - Compiles and links. Boots under Xvfb + Mesa llvmpipe: Vulkan up, XEX loads, recompiled code runs into
   the game's own archive loading (`d:\DATA\*.AST`). Without fmv.AST / sound.AST it waits there.

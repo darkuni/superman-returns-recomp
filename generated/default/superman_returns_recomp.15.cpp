@@ -69899,6 +69899,19 @@ DEFINE_REX_FUNC(sub_822A0D00) {
 	return;
 }
 
+DEFINE_REX_FUNC(sub_822A0D30) {
+	REX_FUNC_PROLOGUE();
+	// lis r11,-32254
+	ctx.r11.s64 = -2113798144;
+	// addi r11,r11,-11272
+	ctx.r11.s64 = ctx.r11.s64 + -11272;
+	// stw r11,0(r3)
+	REX_STORE_U32(ctx.r3.u32 + 0, ctx.r11.u32);
+	// b 0x8269ee18
+	sub_8269EE18(ctx, base);
+	return;
+}
+
 DEFINE_REX_FUNC(sub_822A0D40) {
 	REX_FUNC_PROLOGUE();
 	uint32_t ea{};

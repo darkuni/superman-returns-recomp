@@ -1701,6 +1701,12 @@ DEFINE_REX_FUNC(sub_82160490) {
 	return;
 }
 
+DEFINE_REX_FUNC(sub_821604AC) {
+	REX_FUNC_PROLOGUE();
+	// blr 
+	return;
+}
+
 DEFINE_REX_FUNC(sub_821604B0) {
 	REX_FUNC_PROLOGUE();
 	// blr 
@@ -2285,6 +2291,12 @@ DEFINE_REX_FUNC(sub_82160830) {
 	ctx.ctr.u64 = ctx.r11.u64;
 	// bctr 
 	REX_CALL_INDIRECT_FUNC(ctx.ctr.u32);
+	return;
+}
+
+DEFINE_REX_FUNC(sub_8216084C) {
+	REX_FUNC_PROLOGUE();
+	// blr 
 	return;
 }
 
@@ -9380,6 +9392,12 @@ DEFINE_REX_FUNC(sub_82163618) {
 	ctx.ctr.u64 = ctx.r11.u64;
 	// bctr 
 	REX_CALL_INDIRECT_FUNC(ctx.ctr.u32);
+	return;
+}
+
+DEFINE_REX_FUNC(sub_82163638) {
+	REX_FUNC_PROLOGUE();
+	// blr 
 	return;
 }
 
