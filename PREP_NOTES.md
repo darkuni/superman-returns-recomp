@@ -83,6 +83,15 @@ The seven `.embsec_` sections are extra code sections covered by `.pdata`; check
 - Build 3: SDK package p23 on both platforms (Linux applies the sdk-builds patches at tag
   sdk-v0.9.0-p23), defaults v4 turn on xma_stall_on_missing_packet + xma_trace.
 
+## Test 3 (Windows): crash ~35 s in, inside XMAGetOutputBufferWriteOffset(NULL)
+- Called from sub_826592F0 (EA's XMA stream reader: reads write/read offsets per voice, 6144-byte /
+  24-block output ring). A voice still on its list had its context pointer cleared - a release race.
+- The stall path never fired (no stall / error 4 in the log). xma_trace logged ~1000 lines/s from the
+  same audio thread, which plausibly widened the race window.
+- Build 4: src/xma_guard.cpp overrides the 14 context-taking XMA imports (exe definitions beat the SDK
+  DLL's), forwards to the SDK's *_entry, returns 0 on a NULL context (logged once per call), and logs
+  each new decode/parser error pair the game polls. Defaults v5 turn xma_trace back off.
+
 ## Linux build (checked in this session, Ubuntu 24.04 / clang 20)
 - Compiles and links. Boots under Xvfb + Mesa llvmpipe: Vulkan up, XEX loads, recompiled code runs into
   the game's own archive loading (`d:\DATA\*.AST`). Without fmv.AST / sound.AST it waits there.

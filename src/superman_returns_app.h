@@ -107,6 +107,15 @@ class SupermanReturnsApp : public rex::ReXApp {
       if (!config_path_.empty()) rex::cvar::SaveConfig(config_path_);
       REXLOG_INFO("Defaults v4: xma_stall_on_missing_packet on, xma_trace on");
     }
+    // v0.0.4 (test 3): xma_trace logged ~1000 lines/s from the audio thread and
+    // shifted its timing enough to hit a voice-release race (now guarded in
+    // src/xma_guard.cpp, which also logs decode errors). Trace back off.
+    if (rex::cvar::Query<int32_t>("recomp_defaults_version") < 5) {
+      rex::cvar::SetFlagByName("xma_trace", "false");
+      rex::cvar::SetFlagByName("recomp_defaults_version", "5");
+      if (!config_path_.empty()) rex::cvar::SaveConfig(config_path_);
+      REXLOG_INFO("Defaults v5: xma_trace off");
+    }
     REXLOG_INFO("Audio buffer: {} frames", rex::cvar::Query<int32_t>("audio_maxqframes"));
   }
 

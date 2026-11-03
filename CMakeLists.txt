@@ -16,6 +16,7 @@ set(SUPERMANRETURNS_SOURCES
     src/game_menu.cpp
     src/crash_handler.cpp
     src/disc_setup.cpp
+    src/xma_guard.cpp
 )
 
 if(WIN32)

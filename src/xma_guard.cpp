@@ -1,0 +1,115 @@
+// NULL-context guard for the XMA kernel calls Superman Returns makes.
+//
+// Test 3 crashed inside XMAGetOutputBufferWriteOffset(NULL): EA's XMA stream
+// reader (sub_826592F0) walks its voice list and reads each voice's context
+// without a null check. A voice released on another thread was still on the
+// list with its context pointer already cleared. On the console the audio
+// threads' fixed scheduling hides that window; on PC it doesn't.
+//
+// These definitions take precedence over the SDK's exports of the same name
+// (an object file beats the import library on Windows; the executable's
+// symbols interpose the shared library's on Linux). Each one forwards to the
+// SDK's own implementation unless the context is NULL, in which case it logs
+// once per call and returns 0 - the voice reads as "no progress" and the game
+// drops it on its next pass. Release-time errors are not hidden: decode errors
+// the game polls for are logged once per context.
+
+#include <atomic>
+#include <cstdint>
+
+#include <rex/audio/xma/context.h>
+#include <rex/hook.h>
+#include <rex/logging.h>
+#include <rex/types.h>
+
+namespace rex::kernel::xboxkrnl {
+u32 XMAReleaseContext_entry(mapped_void context_ptr);
+u32 XMASetInputBuffer0_entry(mapped_void context_ptr, mapped_void buffer, u32 packet_count);
+u32 XMASetInputBuffer1_entry(mapped_void context_ptr, mapped_void buffer, u32 packet_count);
+u32 XMAIsInputBuffer0Valid_entry(mapped_void context_ptr);
+u32 XMAIsInputBuffer1Valid_entry(mapped_void context_ptr);
+u32 XMASetInputBuffer0Valid_entry(mapped_void context_ptr);
+u32 XMASetInputBuffer1Valid_entry(mapped_void context_ptr);
+u32 XMAIsOutputBufferValid_entry(mapped_void context_ptr);
+u32 XMASetOutputBufferValid_entry(mapped_void context_ptr);
+u32 XMAGetOutputBufferReadOffset_entry(mapped_void context_ptr);
+u32 XMASetOutputBufferReadOffset_entry(mapped_void context_ptr, u32 value);
+u32 XMAGetOutputBufferWriteOffset_entry(mapped_void context_ptr);
+u32 XMAEnableContext_entry(mapped_void context_ptr);
+u32 XMADisableContext_entry(mapped_void context_ptr, u32 wait);
+}  // namespace rex::kernel::xboxkrnl
+
+namespace {
+namespace k = rex::kernel::xboxkrnl;
+
+// One log line per guarded call (by name), so a recurring race doesn't flood the log.
+struct Once {
+  std::atomic<bool> fired{false};
+  bool first() { return !fired.exchange(true); }
+};
+
+bool null_context(PPCContext& ctx, const char* name, Once& once) {
+  if (ctx.r3.u32 != 0) return false;
+  if (once.first()) {
+    REXAPU_WARN("[xma-guard] {}(NULL) from {:08X} - voice already released; returning 0 "
+                "(logged once)",
+                name, static_cast<uint32_t>(ctx.lr));
+  }
+  ctx.r3.u64 = 0;
+  return true;
+}
+
+// Decode errors (the stock decoder sets these where the hardware would not) are
+// what EA's mixer reacts to by tearing voices - or the whole engine - down.
+std::atomic<uint32_t> g_error_logged[10] = {};
+void note_errors(uint8_t* base, uint32_t context) {
+  rex::audio::XMA_CONTEXT_DATA data(base + context);
+  if (!data.error_set && !data.parser_error_set) return;
+  const uint32_t key = (data.error_status << 5) | data.parser_error_status;
+  for (auto& slot : g_error_logged) {
+    uint32_t cur = slot.load();
+    if (cur == (key | 0x80000000u)) return;
+    if (cur == 0 && slot.compare_exchange_strong(cur, key | 0x80000000u)) {
+      REXAPU_WARN("[xma-guard] context {:08X} reports decode error {} / parser error {} "
+                  "(first time this error pair is seen)",
+                  context, uint32_t(data.error_status), uint32_t(data.parser_error_status));
+      return;
+    }
+  }
+}
+}  // namespace
+
+#define XMA_GUARD(name, ...)                                                    \
+  extern "C" REX_FUNC(__imp__##name) {                                          \
+    static Once once;                                                           \
+    if (null_context(ctx, #name, once)) return;                                 \
+    rex::ppc::HostToGuestFunction<&k::name##_entry>(ctx, base);                 \
+  }
+
+XMA_GUARD(XMAReleaseContext)
+XMA_GUARD(XMASetInputBuffer0)
+XMA_GUARD(XMASetInputBuffer1)
+XMA_GUARD(XMAIsInputBuffer0Valid)
+XMA_GUARD(XMAIsInputBuffer1Valid)
+XMA_GUARD(XMASetInputBuffer0Valid)
+XMA_GUARD(XMASetInputBuffer1Valid)
+XMA_GUARD(XMAIsOutputBufferValid)
+XMA_GUARD(XMASetOutputBufferValid)
+XMA_GUARD(XMASetOutputBufferReadOffset)
+XMA_GUARD(XMAEnableContext)
+XMA_GUARD(XMADisableContext)
+
+// The two the game polls every mixer pass: also where decode errors get noticed.
+extern "C" REX_FUNC(__imp__XMAGetOutputBufferReadOffset) {
+  static Once once;
+  if (null_context(ctx, "XMAGetOutputBufferReadOffset", once)) return;
+  note_errors(base, ctx.r3.u32);
+  rex::ppc::HostToGuestFunction<&k::XMAGetOutputBufferReadOffset_entry>(ctx, base);
+}
+
+extern "C" REX_FUNC(__imp__XMAGetOutputBufferWriteOffset) {
+  static Once once;
+  if (null_context(ctx, "XMAGetOutputBufferWriteOffset", once)) return;
+  note_errors(base, ctx.r3.u32);
+  rex::ppc::HostToGuestFunction<&k::XMAGetOutputBufferWriteOffset_entry>(ctx, base);
+}
