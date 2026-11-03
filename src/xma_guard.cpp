@@ -17,17 +17,22 @@
 #include <atomic>
 #include <chrono>
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 
 #include <rex/audio/xma/context.h>
 #include <rex/hook.h>
 #include <rex/logging.h>
+#include <rex/system/xio.h>
 #include <rex/types.h>
 
 #include "ea_track.h"
 
 namespace rex::kernel::xboxkrnl {
 u32 XMACreateContext_entry(mapped_u32 context_out_ptr);
+u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_ptr,
+                     mapped_void apc_context, ppc_ptr_t<rex::system::X_IO_STATUS_BLOCK> io_status_block,
+                     mapped_void buffer, u32 buffer_length, mapped_u64 byte_offset_ptr);
 u32 XMAReleaseContext_entry(mapped_void context_ptr);
 u32 XMASetInputBuffer0_entry(mapped_void context_ptr, mapped_void buffer, u32 packet_count);
 u32 XMASetInputBuffer1_entry(mapped_void context_ptr, mapped_void buffer, u32 packet_count);
@@ -177,4 +182,60 @@ void xma_report_errors(uint8_t* base) {
     }
   }
   REXAPU_WARN("[xma-guard]   {} of {} XMA contexts have an error flag set", bad, n);
+}
+
+void xma_dump_context(uint8_t* base, uint32_t c, const char* label) {
+  rex::audio::XMA_CONTEXT_DATA d(base + c);
+  REXAPU_WARN("[xma-guard] {}context {:08X}: in0 {:08X}x{} valid {} | in1 {:08X}x{} valid {} | current {} "
+              "in_rd {} | out {:08X} blocks {} rd {} wr {} valid {} | loop {} {}..{} | sdc {} | "
+              "errors {}/{}",
+              label, c, uint32_t(d.input_buffer_0_ptr), uint32_t(d.input_buffer_0_packet_count),
+              uint32_t(d.input_buffer_0_valid), uint32_t(d.input_buffer_1_ptr),
+              uint32_t(d.input_buffer_1_packet_count), uint32_t(d.input_buffer_1_valid),
+              uint32_t(d.current_buffer), uint32_t(d.input_buffer_read_offset),
+              uint32_t(d.output_buffer_ptr), uint32_t(d.output_buffer_block_count),
+              uint32_t(d.output_buffer_read_offset), uint32_t(d.output_buffer_write_offset),
+              uint32_t(d.output_buffer_valid), uint32_t(d.loop_count), uint32_t(d.loop_start),
+              uint32_t(d.loop_end), uint32_t(d.subframe_decode_count), uint32_t(d.error_status),
+              uint32_t(d.parser_error_status));
+}
+
+// Disc reads: is the stream data for the cinematic actually arriving?
+namespace {
+std::atomic<uint64_t> g_reads{0}, g_read_bytes{0}, g_read_fail{0};
+std::atomic<int64_t> g_last_read_us{0};
+int64_t steady_us() {
+  return std::chrono::duration_cast<std::chrono::microseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+}  // namespace
+
+extern "C" REX_FUNC(__imp__NtReadFile) {
+  const uint32_t handle = ctx.r3.u32, len = ctx.r9.u32, off_ptr = ctx.r10.u32;
+  rex::ppc::HostToGuestFunction<&k::NtReadFile_entry>(ctx, base);
+  const uint32_t status = ctx.r3.u32;
+  ++g_reads;
+  g_read_bytes += len;
+  g_last_read_us = steady_us();
+  if (status != 0 && status != 0x103) {  // not success, not pending
+    const uint64_t n = ++g_read_fail;
+    if (n <= 10) {
+      uint64_t off = 0;
+      if (off_ptr) {
+        __builtin_memcpy(&off, base + off_ptr, 8);
+        off = __builtin_bswap64(off);
+      }
+      REXAPU_WARN("[disc] NtReadFile(handle {:08X}, {} bytes at {:#x}) failed with {:08X} "
+                  "(first 10 logged)",
+                  handle, len, off, status);
+    }
+  }
+}
+
+void file_read_report() {
+  const int64_t last = g_last_read_us.load();
+  REXAPU_WARN("[disc]   {} reads so far ({} MB), {} failed, last read {} ms ago", g_reads.load(),
+              g_read_bytes.load() >> 20, g_read_fail.load(),
+              last ? (steady_us() - last) / 1000 : -1);
 }

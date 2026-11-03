@@ -42,8 +42,6 @@ std::atomic<uint64_t> g_pacing_callbacks{0};
 std::atomic<uint64_t> g_submits{0};
 std::atomic<uint64_t> g_filled{0};
 
-void ea_audio_keepalive(PPCContext& ctx, uint8_t* base);  // src/audio_diag.cpp
-
 namespace {
 namespace k = rex::kernel::xboxkrnl;
 
@@ -79,8 +77,8 @@ void callback_wrapper(PPCContext& __restrict ctx, uint8_t* base) {
     c.r4.u64 = silence;
     rex::ppc::HostToGuestFunction<&k::XAudioSubmitRenderDriverFrame_entry>(c, base);
   }
-  PPCContext c = saved;
-  ea_audio_keepalive(c, base);
+  // No keep-alive here any more: freeing EA's buffer slot from outside broke its slot
+  // bookkeeping with XAudio2 and killed all audio from the start (test 8).
 }
 }  // namespace
 

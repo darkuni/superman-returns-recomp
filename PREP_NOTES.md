@@ -147,6 +147,16 @@ The seven `.embsec_` sections are extra code sections covered by `.pdata`; check
 - Local test env after a container restart: start pulseaudio again (else no callbacks); logs only
   flush on warnings, so a silent log is not a hang - check with gdb "thread apply all bt".
 
+## Test 8 (Windows): no crash, but ZERO audio from the start
+- Zero audio = test 7's keep-alive: it freed EA's buffer slot at startup (DSP late 227 ms), breaking
+  the slot bookkeeping with XAudio2. Removed in build 9 (the 90% drain alone prevents the crash).
+- The stall itself: EA audio thread inside 8265A148 -> 826592F0 (XMA stream reader), spinning -
+  148 M XMA calls in 1 s, 441 M by 5 s. The reader loops until its voices produced the samples it
+  needs; samples come from a chunk queue on the reader object (+0x24 count, +0x30 queue). An empty
+  queue = 0 progress forever. So a stream's data stops arriving at the XMV cinematic.
+- Build 9: dumps the reader object, each voice entry and its XMA context (input/output buffers,
+  offsets, valid flags) at the stall; counts NtReadFile calls / failures / last read time.
+
 ## Linux build (checked in this session, Ubuntu 24.04 / clang 20)
 - Compiles and links. Boots under Xvfb + Mesa llvmpipe: Vulkan up, XEX loads, recompiled code runs into
   the game's own archive loading (`d:\DATA\*.AST`). Without fmv.AST / sound.AST it waits there.

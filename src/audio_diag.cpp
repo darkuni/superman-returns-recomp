@@ -136,10 +136,47 @@ XA_LIST(XA_HOOK)
     __imp__sub_##a(ctx, base);    \
   }
 // sub_8264C540 (DSP update) is hooked in src/audio_hooks.cpp; it calls ea_track_dsp().
-#define EA_TRACKED_HERE(X) X(8265A148) X(826592F0) X(82658958) X(8265AAD0) X(8265AB00) \
+#define EA_TRACKED_HERE(X) X(8265A148) X(82658958) X(8265AAD0) X(8265AB00) \
   X(82650810) X(825FC108) X(821169A8) X(8264C400) X(8264C410) X(8265A6C0)
 EA_TRACKED_HERE(EA_TRACK_DECL)
 EA_TRACKED_HERE(EA_TRACK_HOOK)
+
+// The XMA stream reader: loops until its voices have produced the samples it needs. Test 8
+// caught EA's audio thread spinning in here (440 million XMA calls in 5 s).
+extern "C" REX_FUNC(__imp__sub_826592F0);
+namespace {
+std::atomic<uint32_t> g_reader_obj{0};
+std::atomic<uint32_t> g_reader_need{0};
+}  // namespace
+extern "C" REX_FUNC(sub_826592F0) {
+  if (t_is_ea_audio) {
+    g_reader_obj = ctx.r3.u32;
+    g_reader_need = ctx.r5.u32;
+  }
+  EaScope scope(0x826592F0);
+  __imp__sub_826592F0(ctx, base);
+}
+
+void xma_dump_context(uint8_t* base, uint32_t c, const char* label);  // src/xma_guard.cpp
+void file_read_report();                                                // src/xma_guard.cpp
+
+void reader_dump(uint8_t* base) {
+  const uint32_t r = g_reader_obj.load();
+  if (!r) return;
+  auto w = [&](uint32_t a) { return rd32(base, a); };
+  REXAPU_WARN("[ea-audio]   stream reader object {:08X} (asked for {}): +18 {:08X} +1C {:08X} +20 {:08X} "
+              "+24(avail) {:08X} +28 {:08X} +2C {:08X} +30(queue) {:08X} +34 {:08X} +38 {:08X} +3C {:08X}",
+              r, g_reader_need.load(), w(r + 0x18), w(r + 0x1C), w(r + 0x20), w(r + 0x24), w(r + 0x28),
+              w(r + 0x2C), w(r + 0x30), w(r + 0x34), w(r + 0x38), w(r + 0x3C));
+  const uint32_t arr = w(r + 0x18), count = w(r + 0x20);
+  for (uint32_t i = 0; i < count && i < 8; i++) {
+    const uint32_t e = arr + i * 24;
+    const uint32_t obj = w(e);
+    REXAPU_WARN("[ea-audio]     voice {} entry {:08X}: {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} -> xma context {:08X}",
+                i, e, w(e), w(e + 4), w(e + 8), w(e + 12), w(e + 16), w(e + 20), obj ? w(obj) : 0);
+    if (obj && w(obj)) xma_dump_context(base, w(obj), "      ");
+  }
+}
 
 // --- EA audio thread and voice callbacks --------------------------------------
 extern "C" REX_FUNC(sub_82650B78) {
@@ -241,5 +278,7 @@ void ea_audio_stall_report(uint8_t* base) {
     REXAPU_WARN("[ea-audio]     #{} sub_{:08X} (entered {} ms ago)", d, g_ea_stack[d].load(),
                 (now - g_ea_stack_since[d].load()) / 1000);
   }
+  reader_dump(base);
+  file_read_report();
   xma_report_errors(base);
 }
