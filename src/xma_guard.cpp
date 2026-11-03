@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <algorithm>
 #include <cstdint>
 
 #include <rex/audio/xma/context.h>
@@ -24,6 +25,7 @@
 #include <rex/types.h>
 
 namespace rex::kernel::xboxkrnl {
+u32 XMACreateContext_entry(mapped_u32 context_out_ptr);
 u32 XMAReleaseContext_entry(mapped_void context_ptr);
 u32 XMASetInputBuffer0_entry(mapped_void context_ptr, mapped_void buffer, u32 packet_count);
 u32 XMASetInputBuffer1_entry(mapped_void context_ptr, mapped_void buffer, u32 packet_count);
@@ -131,4 +133,45 @@ extern "C" REX_FUNC(__imp__XMAGetOutputBufferWriteOffset) {
   if (null_context(ctx, "XMAGetOutputBufferWriteOffset", once)) return;
   note_errors(base, ctx.r3.u32);
   rex::ppc::HostToGuestFunction<&k::XMAGetOutputBufferWriteOffset_entry>(ctx, base);
+}
+
+// Every context the game creates, so a stall report can check them all for error flags:
+// XAudio2 reads the context memory directly, which the accessor guards above never see.
+namespace {
+constexpr int kMaxContexts = 512;
+std::atomic<uint32_t> g_contexts[kMaxContexts] = {};
+std::atomic<int> g_context_count{0};
+}  // namespace
+
+extern "C" REX_FUNC(__imp__XMACreateContext) {
+  const uint32_t out = ctx.r3.u32;
+  rex::ppc::HostToGuestFunction<&k::XMACreateContext_entry>(ctx, base);
+  if (ctx.r3.u32 == 0 && out) {
+    uint32_t v;
+    __builtin_memcpy(&v, base + out, 4);
+    v = __builtin_bswap32(v);
+    const int i = g_context_count.fetch_add(1);
+    if (i < kMaxContexts) g_contexts[i] = v;
+  }
+}
+
+void xma_report_errors(uint8_t* base) {
+  const int n = std::min(g_context_count.load(), kMaxContexts);
+  int bad = 0;
+  for (int i = 0; i < n; i++) {
+    const uint32_t c = g_contexts[i].load();
+    if (!c) continue;
+    rex::audio::XMA_CONTEXT_DATA data(base + c);
+    if (data.error_set || data.parser_error_set) {
+      if (++bad <= 8) {
+        REXAPU_WARN("[xma-guard]   context {:08X}: decode error {} (set {}), parser error {} (set {}), "
+                    "input valid {}/{}, output valid {}",
+                    c, uint32_t(data.error_status), uint32_t(data.error_set),
+                    uint32_t(data.parser_error_status), uint32_t(data.parser_error_set),
+                    uint32_t(data.input_buffer_0_valid), uint32_t(data.input_buffer_1_valid),
+                    uint32_t(data.output_buffer_valid));
+      }
+    }
+  }
+  REXAPU_WARN("[xma-guard]   {} of {} XMA contexts have an error flag set", bad, n);
 }

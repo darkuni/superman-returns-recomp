@@ -109,6 +109,10 @@ std::atomic<uint32_t> g_xma_disable_ctx{0};
 std::atomic<uint32_t> g_xma_disable_lr{0};
 std::atomic<uint32_t> g_xma_disable_wait{0};
 
+// Last DSP update time, read by the keep-alive in src/audio_diag.cpp.
+std::atomic<int64_t> g_dsp_last_update_us{0};
+void ea_audio_stall_report(uint8_t* base);  // src/audio_diag.cpp
+
 // Counted by src/audio_pacing.cpp: render callbacks, frames the game submitted, silence fills.
 extern std::atomic<uint64_t> g_pacing_callbacks;
 extern std::atomic<uint64_t> g_submits;
@@ -150,6 +154,7 @@ void watchdog() {
                     "So far: {} render callbacks, {} game frames, {} silence fills",
                     (now - last) / 1000, off, cap, g_pacing_callbacks.load(), g_submits.load(),
                     g_filled.load());
+        if (g_base) ea_audio_stall_report(g_base);
       }
     } else if (starved && last > episode_start) {
       starved = false;
@@ -217,6 +222,7 @@ extern "C" REX_FUNC(sub_8264C540) {
   __imp__sub_8264C540(ctx, base);
   g_update_enter_us = 0;
   g_last_update_us = now_us();
+  g_dsp_last_update_us = g_last_update_us.load();
 }
 
 extern "C" REX_FUNC(sub_8264C958) {
@@ -229,6 +235,7 @@ extern "C" REX_FUNC(sub_8264C958) {
   g_base = base;
   g_mixer = mixer;
   g_last_update_us = now_us();  // watchdog measures from init until the first DSP update
+  g_dsp_last_update_us = g_last_update_us.load();
   if (mixer && !g_watchdog_started.exchange(true)) std::thread(watchdog).detach();
 }
 

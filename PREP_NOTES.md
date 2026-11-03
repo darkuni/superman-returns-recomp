@@ -119,6 +119,21 @@ The seven `.embsec_` sections are extra code sections covered by `.pdata`; check
 - Local test notes: Xvfb wedges after a while (restart it); logs only flush on warnings, so use
   REXAPU_WARN for test lines; SDL here has pulseaudio, not dummy/disk.
 
+## Test 6 (Windows): pacing fix was the wrong target
+- 6864 render callbacks = 6864 frames submitted, 0 silence fills: the XAudio2 tick never stopped.
+- EA audio thread sub_82650B78: KeWaitForSingleObject(obj+0x30A0, INFINITE) each pass; that event is
+  only set by the XAudio2 voice callbacks sub_826509E8 (pass) / sub_82650A08 (buffer end - also clears
+  the slot state at obj+0x3154/+0x3158). A pass is skipped while the current slot is in use.
+- 821209F0 is XAudio2's engine tick (sub_82117F10): sets tick event 0x829AC0B8, waits on done
+  0x829AC094 / abort 0x829AC0D8 (manual reset, set by XAudio2's timer routine sub_82118750), submits.
+  Processing thread sub_82117810 waits on tick, runs the pass (82116D68, 82118068), sets done.
+- Test 6 minidump: XAudio2 processing thread (29316) idle in its tick wait; EA thread asleep.
+  So XAudio2 stopped processing EA's voice at the cinematic; why is the open question.
+- Build 7: keep-alive frees EA's current slot + sets its event after 30 ms without a DSP update
+  (verified here: voice callbacks dropped, DSP updates continue at ~30 Hz, no overflow). Stall report
+  adds XAudio2 engine state, event states, pass / timer-routine counts, all XAudio2 calls in last 3 s.
+- Minidumps: symbolize with python minidump + the build's .map (stacks are only 1-3 KB each).
+
 ## Linux build (checked in this session, Ubuntu 24.04 / clang 20)
 - Compiles and links. Boots under Xvfb + Mesa llvmpipe: Vulkan up, XEX loads, recompiled code runs into
   the game's own archive loading (`d:\DATA\*.AST`). Without fmv.AST / sound.AST it waits there.

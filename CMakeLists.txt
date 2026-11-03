@@ -19,6 +19,7 @@ set(SUPERMANRETURNS_SOURCES
     src/xma_guard.cpp
     src/audio_hooks.cpp
     src/audio_pacing.cpp
+    src/audio_diag.cpp
 )
 
 if(WIN32)
