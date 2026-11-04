@@ -23,6 +23,7 @@
 #include <rex/audio/xma/context.h>
 #include <rex/hook.h>
 #include <rex/logging.h>
+#include <rex/system/kernel_state.h>
 #include <rex/system/xio.h>
 #include <rex/types.h>
 
@@ -52,6 +53,10 @@ u32 XMADisableContext_entry(mapped_void context_ptr, u32 wait);
 namespace {
 namespace k = rex::kernel::xboxkrnl;
 
+// XMA contexts live in a heap mapped at a host offset (0xE0000000+ range): base + address is
+// the wrong memory there. Builds 9-10 dumped (and checked error flags in) the wrong bytes.
+uint8_t* ctx_mem(uint32_t c) { return REX_KERNEL_MEMORY()->TranslateVirtual<uint8_t*>(c); }
+
 // One log line per guarded call (by name), so a recurring race doesn't flood the log.
 struct Once {
   std::atomic<bool> fired{false};
@@ -74,7 +79,7 @@ bool null_context(PPCContext& ctx, const char* name, Once& once) {
 // what EA's mixer reacts to by tearing voices - or the whole engine - down.
 std::atomic<uint32_t> g_error_logged[10] = {};
 void note_errors(uint8_t* base, uint32_t context) {
-  rex::audio::XMA_CONTEXT_DATA data(base + context);
+  rex::audio::XMA_CONTEXT_DATA data(ctx_mem(context));
   if (!data.error_set && !data.parser_error_set) return;
   const uint32_t key = (data.error_status << 5) | data.parser_error_status;
   for (auto& slot : g_error_logged) {
@@ -138,6 +143,28 @@ extern "C" REX_FUNC(__imp__XMAGetOutputBufferReadOffset) {
 
 void reader_spin_check(PPCContext& ctx, uint8_t* base, uint32_t xctx);  // src/audio_diag.cpp
 
+// Kick a context so the decoder runs another pass (the SDK decoder does one pass per kick;
+// the hardware keeps decoding while a context is enabled). Leaves r3 / lr as they were.
+void xma_kick(PPCContext& ctx, uint8_t* base, uint32_t c) {
+  const uint64_t r3 = ctx.r3.u64;
+  const auto lr = ctx.lr;
+  ctx.r3.u64 = c;
+  rex::ppc::HostToGuestFunction<&k::XMAEnableContext_entry>(ctx, base);
+  ctx.r3.u64 = r3;
+  ctx.lr = lr;
+}
+
+// Output state of a context, for the reader's stall log.
+bool xma_output_state(uint32_t c, uint32_t* rd, uint32_t* wr, uint32_t* valid, uint32_t* in_valid) {
+  if (!c) return false;
+  rex::audio::XMA_CONTEXT_DATA d(ctx_mem(c));
+  *rd = d.output_buffer_read_offset;
+  *wr = d.output_buffer_write_offset;
+  *valid = d.output_buffer_valid;
+  *in_valid = (uint32_t(d.input_buffer_0_valid) << 1) | uint32_t(d.input_buffer_1_valid);
+  return true;
+}
+
 extern "C" REX_FUNC(__imp__XMAGetOutputBufferWriteOffset) {
   static Once once;
   if (null_context(ctx, "XMAGetOutputBufferWriteOffset", once)) return;
@@ -175,7 +202,7 @@ void xma_report_errors(uint8_t* base) {
   for (int i = 0; i < n; i++) {
     const uint32_t c = g_contexts[i].load();
     if (!c) continue;
-    rex::audio::XMA_CONTEXT_DATA data(base + c);
+    rex::audio::XMA_CONTEXT_DATA data(ctx_mem(c));
     if (data.error_set || data.parser_error_set) {
       if (++bad <= 8) {
         REXAPU_WARN("[xma-guard]   context {:08X}: decode error {} (set {}), parser error {} (set {}), "
@@ -191,7 +218,7 @@ void xma_report_errors(uint8_t* base) {
 }
 
 void xma_dump_context(uint8_t* base, uint32_t c, const char* label) {
-  rex::audio::XMA_CONTEXT_DATA d(base + c);
+  rex::audio::XMA_CONTEXT_DATA d(ctx_mem(c));
   REXAPU_WARN("[xma-guard] {}context {:08X}: in0 {:08X}x{} valid {} | in1 {:08X}x{} valid {} | current {} "
               "in_rd {} | out {:08X} blocks {} rd {} wr {} valid {} | loop {} {}..{} | sdc {} | "
               "errors {}/{}",

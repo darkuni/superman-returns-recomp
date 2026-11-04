@@ -247,6 +247,10 @@ namespace {
 int64_t spin_now_us() { return now_us(); }
 }  // namespace
 
+void xma_kick(PPCContext& ctx, uint8_t* base, uint32_t c);  // src/xma_guard.cpp
+bool xma_output_state(uint32_t c, uint32_t* rd, uint32_t* wr, uint32_t* valid, uint32_t* in_valid);
+std::atomic<uint64_t> g_reader_nudges{0}, g_reader_nudge_helped{0};
+
 void reader_spin_check(PPCContext& ctx, uint8_t* base, uint32_t xctx) {
   ReaderSpin& s = t_reader_spin;
   const uint32_t voice = ctx.r31.u32;
@@ -262,7 +266,29 @@ void reader_spin_check(PPCContext& ctx, uint8_t* base, uint32_t xctx) {
       s.wr = wr;
       s.attempts = 0;
     }
-    if (++s.attempts == 64) s.since = spin_now_us();
+    if (s.attempts == 0 && s.nudged) ++g_reader_nudge_helped;
+    if (s.attempts == 0) s.nudged = false;
+    if (++s.attempts == 32) s.since = spin_now_us();
+    if (s.attempts >= 32 && s.attempts % 32 == 0) {
+      // The decoder has stopped short of what the reader needs. On the console it keeps
+      // decoding while the context is enabled; the SDK's runs one pass per kick, and the
+      // reader only kicks when its read offset moves. Top up the voices' input buffers (the
+      // feeder normally runs only after the read) and kick this voice's context.
+      const uint64_t nn = ++g_reader_nudges;
+      if (nn == 1 || nn % 20000 == 0) {
+        REXAPU_WARN("[ea-audio] reader nudge #{}: refilled input + kicked the decoder ({} were "
+                    "followed by progress, {} stalls broken so far)",
+                    nn, g_reader_nudge_helped.load(), g_reader_breaks.load());
+      }
+      s.nudged = true;
+      const uint64_t r3 = ctx.r3.u64;
+      const auto lr = ctx.lr;
+      ctx.r3.u64 = ctx.r28.u64;
+      sub_826586A0(ctx, base);
+      ctx.r3.u64 = r3;
+      ctx.lr = lr;
+      xma_kick(ctx, base, xctx);
+    }
     if (s.attempts > 64) {
       std::this_thread::yield();
       if (spin_now_us() - s.since > 10000) why = "voice's XMA context produced nothing for 10 ms";
@@ -281,6 +307,12 @@ void reader_spin_check(PPCContext& ctx, uint8_t* base, uint32_t xctx) {
                 rd32(base, voice + 16), int(base[voice + 12]), wr, rd32(base, r + 0x24),
                 rd32(base, r + 0x30), rd32(base, r + 0x38), rd32(base, r + 0x0C), rd32(base, r + 0x14),
                 rd32(base, r + 0x3C));
+    uint32_t crd = 0, cwr = 0, cvalid = 0, cin = 0;
+    xma_output_state(xctx, &crd, &cwr, &cvalid, &cin);
+    REXAPU_WARN("[ea-audio]   context {:08X} now: out rd {} wr {} valid {}, input valid {}{} | "
+                "nudges so far {} (followed by progress {})",
+                xctx, crd, cwr, cvalid, cin >> 1, cin & 1, g_reader_nudges.load(),
+                g_reader_nudge_helped.load());
     xma_dump_context(base, xctx, "      ");
   }
   // r29 is what the exit adds to the frames-read total (r19): nothing for a dry queue, the

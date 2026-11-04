@@ -175,6 +175,21 @@ The seven `.embsec_` sections are extra code sections covered by `.pdata`; check
   with registers, reader queues and the context. Hooks submit/feed/read to log other-thread use and
   overlapping access (console: same hardware thread).
 
+## Test 10 (Windows): sound through the first mission, with hitches
+- 1000+ breaks in ~7 min, all "context produced nothing for 10 ms" (none dry, no other-thread or
+  overlapping reader access). The reader saw the write offset stop at 8-block steps (one stereo
+  frame) short of its need: pos 1964 / wr 8, pos 3880 / wr 16. Each break = 10 ms EA-thread stall
+  plus dropped samples = the hitch.
+- The context dumps were wrong memory: XMA contexts sit in the 0xE0000000+ heap, which has a host
+  offset (Memory::TranslateVirtual); base + address reads another context. Same for the error-flag
+  checks (note_errors / xma_report_errors) - "0 errors" in builds 4-10 meant nothing.
+- Likely cause: the SDK decoder clears is_enabled at the start of Work() (one pass per kick); the
+  hardware keeps decoding while enabled. The reader only kicks when its read offset moves (8-block
+  steps for stereo), the feeder only after a read.
+- Build 11: after 32 polls without progress the reader check runs the feeder (826586A0) and kicks the
+  voice's context (XMAEnableContext), every 32 polls; the 10 ms break stays as a last resort.
+  Counts nudges and how many were followed by progress. Context dumps/error checks translate properly.
+
 ## Linux build (checked in this session, Ubuntu 24.04 / clang 20)
 - Compiles and links. Boots under Xvfb + Mesa llvmpipe: Vulkan up, XEX loads, recompiled code runs into
   the game's own archive loading (`d:\DATA\*.AST`). Without fmv.AST / sound.AST it waits there.
