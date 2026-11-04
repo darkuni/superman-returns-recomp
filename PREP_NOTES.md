@@ -190,6 +190,19 @@ The seven `.embsec_` sections are extra code sections covered by `.pdata`; check
   voice's context (XMAEnableContext), every 32 polls; the 10 ms break stays as a last resort.
   Counts nudges and how many were followed by progress. Context dumps/error checks translate properly.
 
+## Test 11 (Windows): hitches remain; context dumps now read the right memory
+- Stuck voices: input valid 0/0 (both buffers used up), out rd 0 wr 8 valid 1, voice +4 (bytes left
+  to feed) 0, pending queue empty. Refill + kick can't help (2.7 M nudges, ~70 followed by progress,
+  460 breaks in 4.5 min). The voice is at the END of its data.
+- Chunk sizes are N*512 + 128 samples (640 = 405 + 235): the hardware outputs the last frame's IMDCT
+  tail. The SDK decoder (FFmpeg) emits 512 per decoded frame and only releases that tail with the
+  next decode (see the stream-skip comment in xma_context.cpp Decode), so a stream's last 128 samples
+  never arrive and the reader waits for them.
+- Build 12: when a voice has no input left and the reader is short after a refill + kick, write the
+  missing samples as silence (xma_pad_tail) and move the write offset. Proper fix later: SDK flushes
+  the tail when the input runs dry (needs an sdk-builds package).
+- Superman in a white suit in mission 2: unlockable Pod Suit, or a rendering bug - screenshot needed.
+
 ## Linux build (checked in this session, Ubuntu 24.04 / clang 20)
 - Compiles and links. Boots under Xvfb + Mesa llvmpipe: Vulkan up, XEX loads, recompiled code runs into
   the game's own archive loading (`d:\DATA\*.AST`). Without fmv.AST / sound.AST it waits there.

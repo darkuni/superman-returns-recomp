@@ -249,7 +249,8 @@ int64_t spin_now_us() { return now_us(); }
 
 void xma_kick(PPCContext& ctx, uint8_t* base, uint32_t c);  // src/xma_guard.cpp
 bool xma_output_state(uint32_t c, uint32_t* rd, uint32_t* wr, uint32_t* valid, uint32_t* in_valid);
-std::atomic<uint64_t> g_reader_nudges{0}, g_reader_nudge_helped{0};
+std::atomic<uint64_t> g_reader_nudges{0}, g_reader_nudge_helped{0}, g_reader_pads{0};
+uint32_t xma_pad_tail(uint32_t c, uint32_t deficit_bytes);  // src/xma_guard.cpp
 
 void reader_spin_check(PPCContext& ctx, uint8_t* base, uint32_t xctx) {
   ReaderSpin& s = t_reader_spin;
@@ -269,16 +270,36 @@ void reader_spin_check(PPCContext& ctx, uint8_t* base, uint32_t xctx) {
     if (s.attempts == 0 && s.nudged) ++g_reader_nudge_helped;
     if (s.attempts == 0) s.nudged = false;
     if (++s.attempts == 32) s.since = spin_now_us();
+    if (s.attempts >= 64 && s.attempts % 32 == 0) {
+      // Already refilled + kicked once with no progress: if the voice has no input left, the
+      // decoder is done - pad the stream's missing tail (see xma_pad_tail).
+      const uint32_t ch = base[voice + 12] ? base[voice + 12] : 1;
+      int32_t avail = int32_t(wr * 256) - int32_t(pos);
+      if (avail < 0) avail += 6144;
+      const int32_t need = ctx.r27.s32 * int32_t(ch) * 2;
+      if (rd32(base, voice + 4) == 0 && need > avail) {
+        const uint32_t blocks = xma_pad_tail(xctx, uint32_t(need - avail));
+        if (blocks) {
+          const uint64_t np = ++g_reader_pads;
+          if (np <= 10 || np % 1000 == 0) {
+            REXAPU_WARN("[ea-audio] stream tail #{}: voice out of input {} frames short - wrote {} "
+                        "silent blocks (reader {:08X}, pos {}, write offset {} -> +{})",
+                        np, (need - avail) / int32_t(ch * 2), blocks, ctx.r28.u32, pos, wr, blocks);
+          }
+          return;  // the reader polls again and finds the samples
+        }
+      }
+    }
     if (s.attempts >= 32 && s.attempts % 32 == 0) {
       // The decoder has stopped short of what the reader needs. On the console it keeps
       // decoding while the context is enabled; the SDK's runs one pass per kick, and the
       // reader only kicks when its read offset moves. Top up the voices' input buffers (the
       // feeder normally runs only after the read) and kick this voice's context.
       const uint64_t nn = ++g_reader_nudges;
-      if (nn == 1 || nn % 20000 == 0) {
+      if (nn == 1 || nn % 200000 == 0) {
         REXAPU_WARN("[ea-audio] reader nudge #{}: refilled input + kicked the decoder ({} were "
-                    "followed by progress, {} stalls broken so far)",
-                    nn, g_reader_nudge_helped.load(), g_reader_breaks.load());
+                    "followed by progress, {} stalls broken, {} stream tails padded so far)",
+                    nn, g_reader_nudge_helped.load(), g_reader_breaks.load(), g_reader_pads.load());
       }
       s.nudged = true;
       const uint64_t r3 = ctx.r3.u64;

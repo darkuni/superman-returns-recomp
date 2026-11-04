@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 
 #include <rex/audio/xma/context.h>
 #include <rex/hook.h>
@@ -152,6 +153,33 @@ void xma_kick(PPCContext& ctx, uint8_t* base, uint32_t c) {
   rex::ppc::HostToGuestFunction<&k::XMAEnableContext_entry>(ctx, base);
   ctx.r3.u64 = r3;
   ctx.lr = lr;
+}
+
+// End of a stream: the voice has no input left, but the reader is still owed samples. The
+// hardware's output for N frames is N*512 + 128 samples - the last frame's IMDCT tail comes out
+// too. The SDK decoder (FFmpeg) holds that tail back until a next frame is decoded, which never
+// comes when the stream ends, and EA's reader counts on it (e.g. a 1-frame chunk = 640 samples).
+// Write the missing samples as silence and move the write offset; returns blocks written,
+// 0 if the context still has input (not at the end) or there is no room.
+uint32_t xma_pad_tail(uint32_t c, uint32_t deficit_bytes) {
+  if (!c || !deficit_bytes) return 0;
+  uint8_t* mem = ctx_mem(c);
+  rex::audio::XMA_CONTEXT_DATA d(mem);
+  if (d.input_buffer_0_valid || d.input_buffer_1_valid) return 0;
+  const uint32_t count = d.output_buffer_block_count;
+  if (!count) return 0;
+  const uint32_t wr = d.output_buffer_write_offset, rd = d.output_buffer_read_offset;
+  const uint32_t used = (wr + count - rd) % count;
+  const uint32_t room = count - used - 1;
+  uint32_t blocks = std::min((deficit_bytes + 255) / 256, room);
+  if (!blocks) return 0;
+  uint8_t* out = REX_KERNEL_MEMORY()->TranslatePhysical<uint8_t*>(d.output_buffer_ptr);
+  for (uint32_t i = 0; i < blocks; i++) {
+    std::memset(out + ((wr + i) % count) * 256, 0, 256);
+  }
+  d.output_buffer_write_offset = (wr + blocks) % count;
+  d.Store(mem);
+  return blocks;
 }
 
 // Output state of a context, for the reader's stall log.
