@@ -23,6 +23,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <thread>
 
 #include <rex/hook.h>
 
@@ -148,13 +149,147 @@ namespace {
 std::atomic<uint32_t> g_reader_obj{0};
 std::atomic<uint32_t> g_reader_need{0};
 }  // namespace
+namespace {
+std::atomic<PPCContext*> g_reader_ctx{nullptr};  // EA thread's live registers while inside
+
+// Who touches a reader: submit (826592A8, appends a stream chunk then feeds), feed (826586A0,
+// moves queued chunks onto the voices' XMA input buffers), read (826592F0). On the console
+// these share one hardware thread; here they can overlap on different host threads.
+std::atomic<uint64_t> g_reader_owner{0};  // host thread id currently inside, 0 = none
+std::atomic<uint32_t> g_reader_owner_fn{0}, g_reader_owner_obj{0};
+std::atomic<uint64_t> g_reader_overlaps{0};
+std::atomic<uint64_t> g_reader_calls_other[3] = {};
+std::atomic<bool> g_reader_other_logged[3] = {};
+thread_local int t_reader_depth = 0;
+uint64_t thread_key() {
+  static std::atomic<uint64_t> next{1};
+  thread_local uint64_t key = next++;
+  return key;
+}
+
+struct ReaderAccess {
+  bool owned = false;
+  ReaderAccess(int which, uint32_t fn, uint32_t obj, uint32_t lr) {
+    if (!t_is_ea_audio) {
+      ++g_reader_calls_other[which];
+      if (!g_reader_other_logged[which].exchange(true)) {
+        REXAPU_WARN("[ea-audio] reader sub_{:08X} also runs on another thread (thread #{}, reader "
+                    "{:08X}, from {:08X}) - first time",
+                    fn, thread_key(), obj, lr);
+      }
+    }
+    if (t_reader_depth++ > 0) return;
+    uint64_t expected = 0;
+    if (g_reader_owner.compare_exchange_strong(expected, thread_key())) {
+      owned = true;
+      g_reader_owner_fn = fn;
+      g_reader_owner_obj = obj;
+    } else {
+      const uint64_t n = ++g_reader_overlaps;
+      if (n <= 10 || n % 10000 == 0) {
+        REXAPU_WARN("[ea-audio] reader race #{}: thread #{} entered sub_{:08X} (reader {:08X}) while "
+                    "thread #{} is inside sub_{:08X} (reader {:08X})",
+                    n, thread_key(), fn, obj, expected, g_reader_owner_fn.load(),
+                    g_reader_owner_obj.load());
+      }
+    }
+  }
+  ~ReaderAccess() {
+    --t_reader_depth;
+    if (owned) g_reader_owner = 0;
+  }
+};
+}  // namespace
+
+thread_local ReaderSpin t_reader_spin;
+std::atomic<uint64_t> g_reader_breaks{0};
+
 extern "C" REX_FUNC(sub_826592F0) {
   if (t_is_ea_audio) {
     g_reader_obj = ctx.r3.u32;
     g_reader_need = ctx.r5.u32;
+    g_reader_ctx = &ctx;
   }
+  t_reader_spin = ReaderSpin{};
+  ReaderAccess access(2, 0x826592F0, ctx.r3.u32, static_cast<uint32_t>(ctx.lr));
   EaScope scope(0x826592F0);
   __imp__sub_826592F0(ctx, base);
+  if (t_is_ea_audio) g_reader_ctx = nullptr;
+}
+
+extern "C" REX_FUNC(__imp__sub_826592A8);
+extern "C" REX_FUNC(sub_826592A8) {
+  ReaderAccess access(0, 0x826592A8, ctx.r3.u32, static_cast<uint32_t>(ctx.lr));
+  __imp__sub_826592A8(ctx, base);
+}
+extern "C" REX_FUNC(__imp__sub_826586A0);
+extern "C" REX_FUNC(sub_826586A0) {
+  ReaderAccess access(1, 0x826586A0, ctx.r3.u32, static_cast<uint32_t>(ctx.lr));
+  __imp__sub_826586A0(ctx, base);
+}
+
+void xma_dump_context(uint8_t* base, uint32_t c, const char* label);  // src/xma_guard.cpp
+
+// Called by the XMAGetOutputBufferWriteOffset guard for the reader's per-voice poll (LR
+// 0x826593F0), after the real call (ctx.r3 = write offset in 256-byte blocks).
+//
+// The reader retries a voice until it has r27 frames, and only clears its retry flag (r26)
+// when a read succeeds. Two ways that never ends:
+//  - r27 == 0: the reader's chunk queue ran dry mid-request (avail +0x24 == 0, ready queue
+//    empty -> r20 forced to 0, r27 = min(r20, avail) = 0). A zero-frame read can't succeed,
+//    and the feeder that would refill the queue only runs after the voice loop.
+//  - the voice's XMA context stops producing while the reader waits on it.
+// Break: r18 is the constant the retry flag is set from (li r18,1 per pass) - with r18 = 0
+// and r26 = 0 the voice loop finishes; r20 = r27 makes the outer loop end too
+// (r20 -= r27). The reader returns what it read so far (r19). r18 is non-volatile: the
+// epilogue restores the caller's value.
+namespace {
+int64_t spin_now_us() { return now_us(); }
+}  // namespace
+
+void reader_spin_check(PPCContext& ctx, uint8_t* base, uint32_t xctx) {
+  ReaderSpin& s = t_reader_spin;
+  const uint32_t voice = ctx.r31.u32;
+  const uint32_t pos = rd32(base, voice + 8);
+  const uint32_t wr = ctx.r3.u32;
+  const char* why = nullptr;
+  if (ctx.r27.s32 <= 0) {
+    why = "no stream data queued (reader ran dry)";
+  } else {
+    if (s.r23 != ctx.r23.u32 || s.pos != pos || s.wr != wr) {
+      s.r23 = ctx.r23.u32;
+      s.pos = pos;
+      s.wr = wr;
+      s.attempts = 0;
+    }
+    if (++s.attempts == 64) s.since = spin_now_us();
+    if (s.attempts > 64) {
+      std::this_thread::yield();
+      if (spin_now_us() - s.since > 10000) why = "voice's XMA context produced nothing for 10 ms";
+    }
+  }
+  if (!why) return;
+
+  const uint32_t r = ctx.r28.u32;
+  const uint64_t n = ++g_reader_breaks;
+  if (n <= 12 || n % 1000 == 0) {
+    REXAPU_WARN("[ea-audio] reader stall #{} broken: {} | reader {:08X} voice #{} entry {:08X} | "
+                "need {} frames (r27), left {} (r20), read {} (r19), retry {} (r26) | voice pos {} "
+                "skip {} ch {} | write offset {} blocks | avail +24 {} ready +30 {:08X} count +38 {} "
+                "pending +0C {:08X} count +14 {} | +3C {:08X}",
+                n, why, r, ctx.r23.u32, voice, ctx.r27.s32, ctx.r20.s32, ctx.r19.s32, ctx.r26.u32, pos,
+                rd32(base, voice + 16), int(base[voice + 12]), wr, rd32(base, r + 0x24),
+                rd32(base, r + 0x30), rd32(base, r + 0x38), rd32(base, r + 0x0C), rd32(base, r + 0x14),
+                rd32(base, r + 0x3C));
+    xma_dump_context(base, xctx, "      ");
+  }
+  // r29 is what the exit adds to the frames-read total (r19): nothing for a dry queue, the
+  // whole request for a timed-out voice (avail +0x24 drops by r27 either way).
+  ctx.r29.u64 = ctx.r27.s32 <= 0 ? 0 : ctx.r27.u64;
+  ctx.r18.u64 = 0;
+  ctx.r26.u64 = 0;
+  ctx.r20.u64 = ctx.r27.u64;
+  s = ReaderSpin{};
 }
 
 void xma_dump_context(uint8_t* base, uint32_t c, const char* label);  // src/xma_guard.cpp
@@ -168,6 +303,18 @@ void reader_dump(uint8_t* base) {
               "+24(avail) {:08X} +28 {:08X} +2C {:08X} +30(queue) {:08X} +34 {:08X} +38 {:08X} +3C {:08X}",
               r, g_reader_need.load(), w(r + 0x18), w(r + 0x1C), w(r + 0x20), w(r + 0x24), w(r + 0x28),
               w(r + 0x2C), w(r + 0x30), w(r + 0x34), w(r + 0x38), w(r + 0x3C));
+  if (PPCContext* c = g_reader_ctx.load()) {
+    REXAPU_WARN("[ea-audio]   reader registers: r18 {} r19 {} r20 {} r21 {:08X} r23 {} r24 {} r25 {} "
+                "r26 {} r27 {} r28 {:08X} r29 {} r30 {} r31 {:08X} lr {:08X}",
+                c->r18.s32, c->r19.s32, c->r20.s32, c->r21.u32, c->r23.s32, c->r24.s32, c->r25.s32,
+                c->r26.s32, c->r27.s32, c->r28.u32, c->r29.s32, c->r30.s32, c->r31.u32,
+                static_cast<uint32_t>(c->lr));
+  }
+  REXAPU_WARN("[ea-audio]   reader pending queue +0C {:08X} +10 {:08X} +14 {} | breaks so far {} | "
+              "other-thread calls: submit {} feed {} read {} | overlaps {}",
+              w(r + 0x0C), w(r + 0x10), w(r + 0x14), g_reader_breaks.load(),
+              g_reader_calls_other[0].load(), g_reader_calls_other[1].load(),
+              g_reader_calls_other[2].load(), g_reader_overlaps.load());
   const uint32_t arr = w(r + 0x18), count = w(r + 0x20);
   for (uint32_t i = 0; i < count && i < 8; i++) {
     const uint32_t e = arr + i * 24;

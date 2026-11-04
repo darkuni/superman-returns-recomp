@@ -27,3 +27,12 @@ struct EaScope {
     if (active) g_ea_depth = g_ea_depth.load() - 1;
   }
 };
+
+// Per-thread state of the stream reader's retry loop (src/audio_diag.cpp reader_spin_check).
+struct ReaderSpin {
+  uint32_t r23 = 0xFFFFFFFFu, pos = 0, wr = 0;
+  uint64_t attempts = 0;
+  int64_t since = 0;
+};
+extern thread_local ReaderSpin t_reader_spin;
+extern std::atomic<uint64_t> g_reader_breaks;

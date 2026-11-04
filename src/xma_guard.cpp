@@ -136,11 +136,17 @@ extern "C" REX_FUNC(__imp__XMAGetOutputBufferReadOffset) {
   rex::ppc::HostToGuestFunction<&k::XMAGetOutputBufferReadOffset_entry>(ctx, base);
 }
 
+void reader_spin_check(PPCContext& ctx, uint8_t* base, uint32_t xctx);  // src/audio_diag.cpp
+
 extern "C" REX_FUNC(__imp__XMAGetOutputBufferWriteOffset) {
   static Once once;
   if (null_context(ctx, "XMAGetOutputBufferWriteOffset", once)) return;
-  note_errors(base, ctx.r3.u32);
+  const uint32_t xctx = ctx.r3.u32;
+  const uint32_t lr = static_cast<uint32_t>(ctx.lr);
+  note_errors(base, xctx);
   rex::ppc::HostToGuestFunction<&k::XMAGetOutputBufferWriteOffset_entry>(ctx, base);
+  // EA's stream reader polling one voice (sub_826592F0): break a retry loop that can't end.
+  if (lr == 0x826593F0) reader_spin_check(ctx, base, xctx);
 }
 
 // Every context the game creates, so a stall report can check them all for error flags:

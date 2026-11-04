@@ -157,6 +157,24 @@ The seven `.embsec_` sections are extra code sections covered by `.pdata`; check
 - Build 9: dumps the reader object, each voice entry and its XMA context (input/output buffers,
   offsets, valid flags) at the stall; counts NtReadFile calls / failures / last read time.
 
+## Test 9 (Windows): audio back until the first cinematic, then silent (no crash)
+- Every p23 build (3-9) stalls ~1 s after `CinematicSupermanReturns` loads (~35 s in); test 2 (stock
+  v0.9.0) got further. EA thread spins in the stream reader 826592F0 (65 M voice polls/s).
+- Reader 826592F0 (vtable 0x820D8DF8, r3 reader, r4 out, r5 frames): r27 = min(r20 left,
+  +0x24 avail); per voice (entries at +0x18, stride 24: +0 ctx obj, +4 input bytes left, +8 ring pos,
+  +12 channels, +13 next input buffer, +16 skip, +20 source) it polls write/read offsets and retries the
+  same voice until a read succeeds (r26 = r18 = 1 on failure). Infinite if r27 == 0: queue ran dry
+  mid-request (+0x24 == 0 and ready queue +0x30 empty -> r20 = 0). Also infinite if the decoder stops
+  producing. Feeder 826586A0 (input buffers, pending +0x0C -> ready +0x30) only runs after the voice
+  loop. Submit 826592A8 (appends a chunk to pending, then feeds) runs on the streaming thread.
+- Dump at the stall (avail 405, pos 1964, wr 0, out valid 0) should let a read succeed, so the
+  registers are needed: build 10 logs them.
+- Build 10: XMAGetOutputBufferWriteOffset at LR 0x826593F0 checks the reader's registers: r27 <= 0, or
+  the same voice with no progress for 10 ms -> r18 = r26 = 0, r20 = r27 (r29 = 0 / r27): the loop ends,
+  the reader returns a short read. Yields after 64 polls. Logs each break (first 12, then every 1000th)
+  with registers, reader queues and the context. Hooks submit/feed/read to log other-thread use and
+  overlapping access (console: same hardware thread).
+
 ## Linux build (checked in this session, Ubuntu 24.04 / clang 20)
 - Compiles and links. Boots under Xvfb + Mesa llvmpipe: Vulkan up, XEX loads, recompiled code runs into
   the game's own archive loading (`d:\DATA\*.AST`). Without fmv.AST / sound.AST it waits there.
